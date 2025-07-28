@@ -1,1 +1,8 @@
 
+Flask
+numpy
+scikit-learn
+mysql-connector-python
+fpdf
+speechrecognition
+werkzeug
