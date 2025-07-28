@@ -1,1 +1,110 @@
+from flask import Flask, render_template, request, redirect, session
+import numpy as np
+from werkzeug.security import generate_password_hash, check_password_hash
+import mysql.connector
+import pickle
+from utils.pdf_generator import create_pdf
+from utils.email_sender import send_email
 
+app = Flask(__name__)
+app.secret_key = 'replace_with_secure_random_key'
+model = pickle.load(open('heart_model.pkl', 'rb'))
+
+def get_db_connection():
+    return mysql.connector.connect(
+        host="localhost",
+        user="your_mysql_user",
+        password="your_mysql_password",
+        database="smartheart"
+    )
+
+@app.route('/')
+def home():
+    if 'user' in session:
+        return render_template('index.html')
+    return redirect('/login')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        name = request.form['name']
+        email = request.form['email']
+        password = generate_password_hash(request.form['password'])
+        cursor.execute("INSERT INTO users (name, email, password) VALUES (%s, %s, %s)",
+                       (name, email, password))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return redirect('/login')
+    return render_template('register.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        email = request.form['email']
+        password = request.form['password']
+        cursor.execute("SELECT * FROM users WHERE email=%s", (email,))
+        user = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if user and check_password_hash(user['password'], password):
+            session['user'] = user['id']
+            session['name'] = user['name']
+            return redirect('/')
+        else:
+            return "Invalid credentials"
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    user_id = session['user']
+    features = [float(x) for x in request.form.values()]
+    final_input = np.array(features).reshape(1, -1)
+    prediction = model.predict(final_input)[0]
+    result = "Heart Disease" if prediction == 1 else "No Heart Disease"
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO predictions
+           (user_id, age, sex, cp, trestbps, chol, fbs, restecg,
+            thalach, exang, oldpeak, slope, ca, thal, result)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (user_id, *features, result)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    pdf_path = create_pdf(session['name'], result, dict(zip(
+        ['age','sex','cp','trestbps','chol','fbs','restecg','thalach','exang','oldpeak','slope','ca','thal'],
+        features)))
+    send_email(email=session.get('email'), subject="Your Heart Report",
+               body=f"Dear {session['name']}, find attached your heart disease prediction report.",
+               attachment_path=pdf_path)
+
+    return render_template('result.html', result=result)
+
+@app.route('/dashboard')
+def dashboard():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT COUNT(*) AS total_users FROM users")
+    users = cursor.fetchone()['total_users']
+    cursor.execute("SELECT result, COUNT(*) AS cnt FROM predictions GROUP BY result")
+    results = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return render_template('dashboard.html', users=users, results=results)
+
+if __name__ == "__main__":
+    app.run(debug=True)
